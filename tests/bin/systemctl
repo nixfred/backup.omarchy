@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  is-active)
+    [[ "$2" == vic-backup.timer ]] && echo active || echo inactive ;;
+  is-enabled) echo enabled ;;
+  show)
+    args="$*"
+    case "$args" in
+      *vic-backup.timer*LoadState*) echo loaded ;;
+      *vic-backup.service*LoadState*) echo loaded ;;
+      *Persistent*) echo yes ;;
+      *LastTriggerUSec*) echo 'Fri 2026-08-28 01:00:00 EDT' ;;
+      *NextElapseUSecRealtime*) echo 'Sat 2026-08-29 01:00:00 EDT' ;;
+      *ExecMainStartTimestamp*) echo 'Fri 2026-08-28 17:13:41 EDT' ;;
+      *Result*) echo success ;;
+      *ControlGroup*) echo '' ;;
+      *) echo '' ;;
+    esac ;;
+esac

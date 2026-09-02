@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "pi.backup-monitor",
+  "name": "Backup Monitor",
+  "version": "1.0.0",
+  "author": "Fred",
+  "license": "MIT",
+  "description": "Live status, schedule, history, and manual start controls for the Vic restic backup.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Backup Monitor",
+    "description": "Monitor vic-backup.service and start a backup from the Omarchy bar.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 60
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 15,
+        "max": 600,
+        "step": 15,
+        "defaultValue": 60
+      }
+    ]
+  }
+}
