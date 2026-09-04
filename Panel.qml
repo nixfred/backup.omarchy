@@ -24,6 +24,55 @@ Panel {
   property string nextRun: ""
   property int failures7d: 0
   property string history: ""
+  // ---- metrics (see the `metrics` script) ----
+  property int    mFilesNew: 0
+  property int    mFilesChanged: 0
+  property int    mFilesUnmodified: 0
+  property real   mAddedBytes: 0
+  property real   mStoredBytes: 0
+  property int    mProcessedFiles: 0
+  property real   mProcessedBytes: 0
+  property int    mDurationSec: 0
+  property real   mRepoBytes: 0
+  property int    mRepoBlobs: 0
+  property string mIface: ""
+  property var    mHistory: []
+
+  function humanBytes(b) {
+    b = Number(b) || 0
+    if (b < 1024) return Math.round(b) + " B"
+    if (b < 1048576) return (b / 1024).toFixed(0) + " KiB"
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + " MiB"
+    if (b < 1099511627776) return (b / 1073741824).toFixed(2) + " GiB"
+    return (b / 1099511627776).toFixed(2) + " TiB"
+  }
+  function humanDur(sec) {
+    sec = Math.round(Number(sec) || 0)
+    if (sec < 60) return sec + "s"
+    var m = Math.floor(sec / 60), r = sec % 60
+    if (m < 60) return m + "m " + r + "s"
+    return Math.floor(m / 60) + "h " + (m % 60) + "m"
+  }
+  // Average bytes/sec across the last run — the honest end-to-end figure,
+  // including scan time, not just the transfer bursts the live graph shows.
+  readonly property real mAvgRate: mDurationSec > 0 ? mProcessedBytes / mDurationSec : 0
+  readonly property real mDedupSaved: Math.max(0, mAddedBytes - mStoredBytes)
+
+  function applyMetrics(m) {
+    mFilesNew = Number(m.filesNew || 0)
+    mFilesChanged = Number(m.filesChanged || 0)
+    mFilesUnmodified = Number(m.filesUnmodified || 0)
+    mAddedBytes = Number(m.addedBytes || 0)
+    mStoredBytes = Number(m.storedBytes || 0)
+    mProcessedFiles = Number(m.processedFiles || 0)
+    mProcessedBytes = Number(m.processedBytes || 0)
+    mDurationSec = Number(m.durationSec || 0)
+    mRepoBytes = Number(m.repoBytes || 0)
+    mRepoBlobs = Number(m.repoBlobs || 0)
+    mIface = m.iface || ""
+    mHistory = m.history || []
+  }
+
   property string actionNote: ""
   property string statusError: ""
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
@@ -51,7 +100,10 @@ Panel {
     if (previousState === "running" && state === "healthy") actionNote = "Backup completed successfully"
     else if (previousState === "running" && state === "failed") actionNote = "Backup failed — check recent history"
   }
-  function refresh() { if (!statusProc.running) statusProc.running = true }
+  function refresh() {
+    if (!statusProc.running) statusProc.running = true
+    if (!metricsProc.running) metricsProc.running = true
+  }
   function startBackup() {
     if (startProc.running || serviceActive === "active" || serviceActive === "activating") return
     state = "running"
@@ -100,6 +152,36 @@ Panel {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
+  }
+
+  // One-shot metrics: last-run stats and run history parsed out of the restic
+  // log. Cheap enough to re-run on every refresh.
+  Process {
+    id: metricsProc
+    command: [root.pluginDir + "/metrics"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try { root.applyMetrics(JSON.parse(text)) } catch (e) { /* keep last good values */ }
+      }
+    }
+  }
+
+  // Live throughput. One long-lived reader emitting a sample per second, rather
+  // than re-spawning a process 60 times a minute. Only runs while the panel is
+  // actually on screen — there is nothing to draw otherwise.
+  Process {
+    id: netStream
+    command: [root.pluginDir + "/metrics", "--stream"]
+    running: root.opened
+    stdout: SplitParser {
+      onRead: function(line) {
+        try {
+          var d = JSON.parse(line)
+          if (d && d.tx !== undefined) throughput.addSample(d.rx, d.tx)
+        } catch (e) { /* a partial line during teardown is not worth reporting */ }
+      }
+    }
   }
 
   IpcHandler {
@@ -216,6 +298,108 @@ Panel {
                 font.pixelSize: Style.font.display
               }
             }
+          }
+
+          PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+          PanelSectionHeader {
+            Layout.fillWidth: true
+            text: root.state === "running" ? "LIVE THROUGHPUT — UPLOADING TO B2" : "NETWORK THROUGHPUT · " + (root.mIface || "link")
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          ThroughputGraph {
+            id: throughput
+            Layout.fillWidth: true
+            active: root.state === "running"
+            accent: root.state === "running" ? "#39d353" : Color.accent
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Text {
+            Layout.fillWidth: true
+            visible: root.state !== "running"
+            text: "Idle — this is total link traffic, not backup traffic. During a run it is dominated by the upload."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+          PanelSectionHeader { Layout.fillWidth: true; text: "LAST SNAPSHOT"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+          // Headline figures for the most recent run.
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(16)
+            Column {
+              spacing: 1
+              Text { text: root.humanBytes(root.mProcessedBytes); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
+              Text { text: "scanned"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            }
+            Column {
+              spacing: 1
+              Text { text: root.humanDur(root.mDurationSec); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
+              Text { text: "duration"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            }
+            Column {
+              spacing: 1
+              Text { text: throughput.humanRate(root.mAvgRate); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
+              Text { text: "avg rate"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            }
+            Item { Layout.fillWidth: true }
+          }
+
+          // How much of the change survived compression + dedup.
+          RatioBar {
+            Layout.fillWidth: true
+            label: "DEDUP & COMPRESSION"
+            trailing: root.mAddedBytes > 0
+              ? root.humanBytes(root.mStoredBytes) + " stored of " + root.humanBytes(root.mAddedBytes)
+              : "no data"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            segments: [
+              { value: root.mStoredBytes, color: Color.accent, name: "stored" },
+              { value: root.mDedupSaved, color: Qt.rgba(0.22, 0.83, 0.33, 0.55), name: "saved " + (root.mAddedBytes > 0 ? Math.round(root.mDedupSaved / root.mAddedBytes * 100) + "%" : "") }
+            ]
+          }
+
+          // What actually changed in the tree — the closest thing available to
+          // "what is being updated" without per-file logging.
+          RatioBar {
+            Layout.fillWidth: true
+            label: "FILE CHURN"
+            trailing: root.mProcessedFiles > 0 ? root.mProcessedFiles.toLocaleString(Qt.locale(), "f", 0) + " files" : "no data"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            segments: [
+              { value: root.mFilesNew, color: "#39d353", name: root.mFilesNew + " new" },
+              { value: root.mFilesChanged, color: "#f5c542", name: root.mFilesChanged + " changed" },
+              { value: root.mFilesUnmodified, color: Qt.rgba(1, 1, 1, 0.14), name: root.mFilesUnmodified + " unchanged" }
+            ]
+          }
+
+          Text {
+            Layout.fillWidth: true
+            visible: root.mRepoBytes > 0
+            text: "Repository " + root.humanBytes(root.mRepoBytes) + " across " + root.mRepoBlobs.toLocaleString(Qt.locale(), "f", 0) + " blobs"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+          PanelSectionHeader { Layout.fillWidth: true; text: "RUN HISTORY — DATA ADDED PER RUN"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+          HistoryBars {
+            Layout.fillWidth: true
+            runs: root.mHistory
+            accent: Color.accent
+            foreground: root.foreground
+            fontFamily: root.fontFamily
           }
 
           PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }

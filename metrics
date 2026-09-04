@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Telemetry for the Restic backup panel's visualisations.
+#
+# Two modes:
+#   metrics            one-shot JSON: last-run stats, repo totals, run history
+#   metrics --stream   one JSON line per second: live network throughput
+#
+# Everything here is readable as an unprivileged user. The backup itself runs
+# as root, but /var/log/restic-backup.log is world-readable (644),
+# /proc/net/dev is world-readable, and journalctl serves the unit to members of
+# wheel. Nothing in this script needs sudo, and it must stay that way — a bar
+# widget escalating privileges to draw a chart would be a bad trade.
+set -uo pipefail
+
+LOG=/var/log/restic-backup.log
+
+# The interface carrying B2 traffic. Derived from the default route rather than
+# hardcoded, so this keeps working on a different machine or if wlo1 is renamed.
+default_iface() {
+  ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
+}
+
+# ---------------------------------------------------------------- stream mode
+# Emits {"tx":<bytes/s>,"rx":<bytes/s>} once a second. The panel drives its
+# throughput graph off this instead of re-spawning a process per sample: one
+# long-lived reader is far cheaper than 60 fork/exec cycles a minute.
+if [[ "${1:-}" == "--stream" ]]; then
+  iface=$(default_iface)
+  [[ -z "$iface" ]] && { echo '{"error":"no default route"}'; exit 1; }
+
+  read_counters() {
+    awk -v ifc="$iface" '$1 ~ "^"ifc":" {gsub(":","",$1); print $2, $10; found=1}
+                         END{ if(!found) print 0, 0 }' /proc/net/dev
+  }
+
+  read -r prev_rx prev_tx < <(read_counters)
+  while sleep 1; do
+    read -r cur_rx cur_tx < <(read_counters)
+    # Counters are 64-bit on modern kernels but can reset if the interface is
+    # re-created; clamp negatives to 0 rather than emitting a huge spike.
+    d_rx=$(( cur_rx - prev_rx )); (( d_rx < 0 )) && d_rx=0
+    d_tx=$(( cur_tx - prev_tx )); (( d_tx < 0 )) && d_tx=0
+    prev_rx=$cur_rx; prev_tx=$cur_tx
+    printf '{"rx":%d,"tx":%d}\n' "$d_rx" "$d_tx"
+  done
+  exit 0
+fi
+
+# ------------------------------------------------------------- one-shot stats
+# Convert restic's human sizes ("3.312 GiB") to bytes so the panel can do maths
+# and pick its own units.
+to_bytes() {
+  awk -v v="$1" -v u="$2" 'BEGIN{
+    m = (u=="KiB")?1024 : (u=="MiB")?1048576 : (u=="GiB")?1073741824 : (u=="TiB")?1099511627776 : 1
+    printf "%.0f", v*m
+  }'
+}
+
+# restic prints "1:44" or "1:02:33"; normalise to seconds.
+dur_to_sec() {
+  awk -F: '{ if (NF==3) print $1*3600+$2*60+$3; else if (NF==2) print $1*60+$2; else print $1+0 }' <<<"$1"
+}
+
+files_new=0; files_changed=0; files_unmodified=0
+dirs_new=0; dirs_changed=0; dirs_unmodified=0
+added_bytes=0; stored_bytes=0
+processed_files=0; processed_bytes=0; duration_sec=0
+repo_blobs=0; repo_bytes=0
+snapshot=""
+
+if [[ -r "$LOG" ]]; then
+  # Only the most recent run block. tac/sed/tac is far cheaper than parsing a
+  # half-megabyte log twice.
+  last_run=$(tac "$LOG" 2>/dev/null | sed '/^=== Backup started:/q' | tac)
+
+  read -r files_new files_changed files_unmodified < <(
+    grep -m1 '^Files:' <<<"$last_run" \
+    | sed -n 's/^Files:[[:space:]]*\([0-9]*\) new,[[:space:]]*\([0-9]*\) changed,[[:space:]]*\([0-9]*\) unmodified.*/\1 \2 \3/p')
+  read -r dirs_new dirs_changed dirs_unmodified < <(
+    grep -m1 '^Dirs:' <<<"$last_run" \
+    | sed -n 's/^Dirs:[[:space:]]*\([0-9]*\) new,[[:space:]]*\([0-9]*\) changed,[[:space:]]*\([0-9]*\) unmodified.*/\1 \2 \3/p')
+
+  # "Added to the repository: 3.312 GiB (1.714 GiB stored)" — the gap between
+  # the two numbers is compression+dedup, which is the interesting figure.
+  read -r a_val a_unit s_val s_unit < <(
+    grep -m1 'Added to the repository:' <<<"$last_run" \
+    | sed -n 's/.*repository:[[:space:]]*\([0-9.]*\) \([KMGT]iB\) (\([0-9.]*\) \([KMGT]iB\) stored).*/\1 \2 \3 \4/p')
+  [[ -n "${a_val:-}" ]] && added_bytes=$(to_bytes "$a_val" "$a_unit")
+  [[ -n "${s_val:-}" ]] && stored_bytes=$(to_bytes "$s_val" "$s_unit")
+
+  # "processed 706897 files, 67.864 GiB in 1:44"
+  read -r p_files p_val p_unit p_dur < <(
+    grep -m1 '^processed ' <<<"$last_run" \
+    | sed -n 's/^processed \([0-9]*\) files, \([0-9.]*\) \([KMGT]iB\) in \([0-9:]*\).*/\1 \2 \3 \4/p')
+  if [[ -n "${p_files:-}" ]]; then
+    processed_files=$p_files
+    processed_bytes=$(to_bytes "$p_val" "$p_unit")
+    duration_sec=$(dur_to_sec "$p_dur")
+  fi
+
+  snapshot=$(grep -oP 'snapshot \K[0-9a-f]{8}(?= saved)' <<<"$last_run" | tail -1)
+
+  # Repo totals come from the prune stage: "remaining: N blobs / X GiB".
+  read -r r_blobs r_val r_unit < <(
+    grep -m1 '^remaining:' <<<"$last_run" \
+    | sed -n 's/^remaining:[[:space:]]*\([0-9]*\) blobs \/ \([0-9.]*\) \([KMGT]iB\).*/\1 \2 \3/p')
+  [[ -n "${r_blobs:-}" ]] && { repo_blobs=$r_blobs; repo_bytes=$(to_bytes "$r_val" "$r_unit"); }
+fi
+
+# ---- run history -----------------------------------------------------------
+# One entry per completed run: duration and bytes added, newest last. Drives the
+# history bar chart. Parsed in a single awk pass over the log.
+history_json=$(awk '
+  /^=== Backup started:/ { added=0; dur=0; ok=0; have=0 }
+  /^Added to the repository:/ {
+    v=$5; u=$6
+    m = (u=="KiB")?1024 : (u=="MiB")?1048576 : (u=="GiB")?1073741824 : (u=="TiB")?1099511627776 : 1
+    added = v*m; have=1
+  }
+  /^processed .* files, .* in / {
+    n=split($NF,t,":")
+    dur = (n==3)? t[1]*3600+t[2]*60+t[3] : (n==2)? t[1]*60+t[2] : t[1]
+  }
+  /^=== Backup completed:/ {
+    if (have) { printf "%s{\"added\":%.0f,\"dur\":%d}", (c++?",":""), added, dur }
+  }
+  END{}
+' "$LOG" 2>/dev/null | tail -c 4000)
+
+# tail -c can slice mid-object; drop a leading partial entry if present.
+history_json="${history_json#*\},}"
+[[ "$history_json" != \{* ]] && history_json=""
+
+iface=$(default_iface)
+
+jq -n \
+  --argjson filesNew "${files_new:-0}" \
+  --argjson filesChanged "${files_changed:-0}" \
+  --argjson filesUnmodified "${files_unmodified:-0}" \
+  --argjson dirsNew "${dirs_new:-0}" \
+  --argjson dirsChanged "${dirs_changed:-0}" \
+  --argjson addedBytes "${added_bytes:-0}" \
+  --argjson storedBytes "${stored_bytes:-0}" \
+  --argjson processedFiles "${processed_files:-0}" \
+  --argjson processedBytes "${processed_bytes:-0}" \
+  --argjson durationSec "${duration_sec:-0}" \
+  --argjson repoBlobs "${repo_blobs:-0}" \
+  --argjson repoBytes "${repo_bytes:-0}" \
+  --arg snapshot "${snapshot:-}" \
+  --arg iface "${iface:-}" \
+  --argjson history "[${history_json}]" \
+  '{
+     filesNew:$filesNew, filesChanged:$filesChanged, filesUnmodified:$filesUnmodified,
+     dirsNew:$dirsNew, dirsChanged:$dirsChanged,
+     addedBytes:$addedBytes, storedBytes:$storedBytes,
+     processedFiles:$processedFiles, processedBytes:$processedBytes,
+     durationSec:$durationSec,
+     repoBlobs:$repoBlobs, repoBytes:$repoBytes,
+     snapshot:$snapshot, iface:$iface,
+     history:$history
+   }'
