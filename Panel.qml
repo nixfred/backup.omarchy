@@ -433,31 +433,13 @@ Panel {
             fontFamily: root.fontFamily
           }
 
-          RowLayout {
+          ThroughputGraph {
+            id: throughput
             Layout.fillWidth: true
-            spacing: Style.space(12)
-
-            ThroughputGraph {
-              id: throughput
-              Layout.fillWidth: true
-              active: root.state === "running"
-              accent: root.state === "running" ? "#39d353" : Color.accent
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            NextRunRing {
-              Layout.alignment: Qt.AlignVCenter
-              Layout.preferredWidth: Style.space(62)
-              Layout.preferredHeight: Style.space(62)
-              nextEpoch: root.mNextEpoch
-              lastEpoch: root.mLastEpoch
-              nowEpoch: root.nowEpoch
-              running: root.state === "running"
-              accent: Color.accent
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
+            active: root.state === "running"
+            accent: root.state === "running" ? "#39d353" : Color.accent
+            foreground: root.foreground
+            fontFamily: root.fontFamily
           }
 
           Text {
@@ -492,7 +474,23 @@ Panel {
               Text { text: throughput.humanRate(root.mAvgRate); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
               Text { text: "avg rate"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
             }
+
             Item { Layout.fillWidth: true }
+
+            // Countdown lives here rather than beside the graph: sharing a row
+            // with a fillWidth Canvas pushed it past the panel's right edge.
+            NextRunRing {
+              Layout.alignment: Qt.AlignVCenter
+              Layout.preferredWidth: Style.space(58)
+              Layout.preferredHeight: Style.space(58)
+              nextEpoch: root.mNextEpoch
+              lastEpoch: root.mLastEpoch
+              nowEpoch: root.nowEpoch
+              running: root.state === "running"
+              accent: Color.accent
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
           }
 
           // How much of the change survived compression + dedup.

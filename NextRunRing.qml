@@ -34,10 +34,13 @@ Item {
     if (nextEpoch <= 0) return "—"
     var s = Math.round(remaining)
     if (s <= 0) return "due"
+    // Kept deliberately short: this label lives inside a 62px ring that sits
+    // flush against the panel edge, so "58m 40s" overflowed and got clipped.
+    // One unit of precision is plenty for a countdown to a nightly job.
     var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
-    if (h > 24) return Math.floor(h / 24) + "d " + (h % 24) + "h"
+    if (h >= 24) return Math.floor(h / 24) + "d " + (h % 24) + "h"
     if (h > 0) return h + "h " + m + "m"
-    if (m > 0) return m + "m " + (s % 60) + "s"
+    if (m > 0) return m + "m"
     return s + "s"
   }
 
@@ -120,6 +123,9 @@ Item {
 
     Text {
       anchors.horizontalCenter: parent.horizontalCenter
+      width: root.width - Style.space(12)
+      horizontalAlignment: Text.AlignHCenter
+      elide: Text.ElideRight
       text: root.humanRemaining()
       color: root.running ? "#39d353" : root.foreground
       font.family: root.fontFamily
@@ -128,6 +134,9 @@ Item {
     }
     Text {
       anchors.horizontalCenter: parent.horizontalCenter
+      width: root.width - Style.space(12)
+      horizontalAlignment: Text.AlignHCenter
+      elide: Text.ElideRight
       text: root.running ? "running" : "next"
       color: Util.alpha(root.foreground, 0.50)
       font.family: root.fontFamily
