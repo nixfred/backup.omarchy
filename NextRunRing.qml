@@ -53,7 +53,15 @@ Item {
   onForegroundChanged: arc.requestPaint()
 
   // Imminent / running glow. Scene-graph only.
+  //
+  // Every reference here is by id, never `parent`. An Animation is not an Item,
+  // so `parent` inside one does not resolve on the animation: it climbs the
+  // scope chain to this component's root and yields root.parent — the row that
+  // hosts the ring. That made the pulse fade and scale the entire "Next
+  // scheduled run" row, and `running` never turned off because the row is
+  // always visible.
   Rectangle {
+    id: glow
     anchors.centerIn: parent
     width: Math.min(root.width, root.height)
     height: width
@@ -66,11 +74,11 @@ Item {
     scale: 1.0
 
     SequentialAnimation {
-      running: parent.visible
+      running: glow.visible
       loops: Animation.Infinite
       ParallelAnimation {
-        NumberAnimation { target: parent; property: "opacity"; from: 0.55; to: 0; duration: 1400; easing.type: Easing.OutQuad }
-        NumberAnimation { target: parent; property: "scale"; from: 1.0; to: 1.35; duration: 1400; easing.type: Easing.OutQuad }
+        NumberAnimation { target: glow; property: "opacity"; from: 0.55; to: 0; duration: 1400; easing.type: Easing.OutQuad }
+        NumberAnimation { target: glow; property: "scale"; from: 1.0; to: 1.35; duration: 1400; easing.type: Easing.OutQuad }
       }
     }
   }
