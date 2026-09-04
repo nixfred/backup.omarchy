@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+timer_active=$(systemctl is-active vic-backup.timer 2>/dev/null || true)
+timer_enabled=$(systemctl is-enabled vic-backup.timer 2>/dev/null || true)
+service_active=$(systemctl is-active vic-backup.service 2>/dev/null || true)
+result=$(systemctl show vic-backup.service -p Result --value 2>/dev/null || true)
+timer_load=$(systemctl show vic-backup.timer -p LoadState --value 2>/dev/null || true)
+service_load=$(systemctl show vic-backup.service -p LoadState --value 2>/dev/null || true)
+persistent=$(systemctl show vic-backup.timer -p Persistent --value 2>/dev/null || true)
+last_trigger=$(systemctl show vic-backup.timer -p LastTriggerUSec --value 2>/dev/null || true)
+next_run=$(systemctl show vic-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
+started=$(systemctl show vic-backup.service -p ExecMainStartTimestamp --value 2>/dev/null || true)
+recent_log=$(journalctl -u vic-backup.service --since '90 days ago' --no-pager -o cat 2>/dev/null || true)
+completed=$(printf '%s\n' "$recent_log" | sed -n 's/^=== Backup completed: \(.*\) ===$/\1/p' | tail -1)
+snapshot=$(printf '%s\n' "$recent_log" | sed -n 's/.*snapshot \([0-9a-f]\{8\}\) saved.*/\1/p' | tail -1)
+failures=$(journalctl -u vic-backup.service --since '7 days ago' --no-pager -o cat 2>/dev/null \
+  | rg -c "Failed with result" || true)
+history=$(journalctl -u vic-backup.service --since '14 days ago' --no-pager -o short-iso 2>/dev/null \
+  | rg 'Backup started:|snapshot [0-9a-f]+ saved|Backup completed:|Main process exited.*status=|Failed with result|Failed to start' \
+  | tail -18 || true)
+
+# Result is reset by a later successful invocation and can even read "success"
+# after a timeout. The journal's latest terminal event is authoritative; retain
+# status=130 as useful detail rather than collapsing it into generic success.
+latest_outcome=$(printf '%s\n' "$recent_log" | rg 'Backup completed:|Failed with result' | tail -1 || true)
+if [[ "$latest_outcome" == *"Failed with result"* ]]; then
+  result=$(sed -n "s/.*Failed with result '\([^']*\)'.*/\1/p" <<<"$latest_outcome")
+  latest_run=$(printf '%s\n' "$recent_log" | tac | sed '/=== Backup started:/q' | tac)
+  exit_status=$(printf '%s\n' "$latest_run" | sed -n 's/.*Main process exited.*status=\([0-9][0-9]*\).*/\1/p' | tail -1)
+  [[ -n "$exit_status" ]] && result="${result:-failed} (status $exit_status)"
+fi
+
+phase="Idle"
+if [[ "$service_active" == active || "$service_active" == activating ]]; then
+  control_group=$(systemctl show vic-backup.service -p ControlGroup --value 2>/dev/null || true)
+  restic_command=""
+  if [[ -n "$control_group" && -r "/sys/fs/cgroup${control_group}/cgroup.procs" ]]; then
+    while read -r pid; do
+      [[ -r "/proc/$pid/cmdline" ]] || continue
+      command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+      [[ "$command_line" == *"restic "* ]] && restic_command="$command_line"
+    done < "/sys/fs/cgroup${control_group}/cgroup.procs"
+  fi
+  case "$restic_command" in
+    *" backup "*|"restic backup"*) phase="Scanning and uploading" ;;
+    *" forget "*|"restic forget"*) phase="Applying retention and pruning" ;;
+    *" prune "*|"restic prune"*) phase="Pruning repository" ;;
+    *)
+      current_log=$(journalctl -u vic-backup.service --since "$started" --no-pager -o cat 2>/dev/null || true)
+      if [[ "$current_log" == *"snapshot "*" saved"* ]]; then
+        phase="Finalizing backup"
+      else
+        phase="Preparing backup"
+      fi
+      ;;
+  esac
+fi
+
+state=healthy
+if [[ "$service_active" == active || "$service_active" == activating ]]; then
+  state=running
+elif [[ "$timer_load" != loaded || "$service_load" != loaded || "$timer_active" != active || "$timer_enabled" != enabled ]]; then
+  state=failed
+elif [[ "$service_active" == failed || ( -n "$result" && "$result" != success ) ]]; then
+  state=failed
+elif [[ -z "$completed" || -z "$snapshot" ]]; then
+  state=failed
+elif [[ -z "$next_run" || "$next_run" == n/a ]]; then
+  state=attention
+elif [[ "$persistent" != yes ]]; then
+  state=attention
+else
+  completed_epoch=$(date --date="$completed" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+  age_seconds=$((now_epoch - completed_epoch))
+  if (( completed_epoch == 0 || age_seconds > 172800 )); then
+    state=failed
+  elif (( age_seconds < -300 || age_seconds > 108000 )); then
+    state=attention
+  fi
+fi
+
+jq -n \
+  --arg state "$state" \
+  --arg timerActive "$timer_active" \
+  --arg timerEnabled "$timer_enabled" \
+  --arg serviceActive "$service_active" \
+  --arg result "$result" \
+  --arg timerLoad "$timer_load" \
+  --arg serviceLoad "$service_load" \
+  --arg persistent "$persistent" \
+  --arg lastTrigger "$last_trigger" \
+  --arg nextRun "$next_run" \
+  --arg started "$started" \
+  --arg phase "$phase" \
+  --arg completed "$completed" \
+  --arg snapshot "$snapshot" \
+  --argjson failures "${failures:-0}" \
+  --arg history "$history" \
+  '{state:$state,timerActive:$timerActive,timerEnabled:$timerEnabled,serviceActive:$serviceActive,result:$result,timerLoad:$timerLoad,serviceLoad:$serviceLoad,persistent:$persistent,lastTrigger:$lastTrigger,nextRun:$nextRun,started:$started,phase:$phase,completed:$completed,snapshot:$snapshot,failures7d:$failures,history:$history}'
