@@ -37,6 +37,56 @@ Panel {
   property int    mRepoBlobs: 0
   property string mIface: ""
   property var    mHistory: []
+  property var    mRuns: []
+  property var    mCalendar: []
+  property double mNextEpoch: 0
+  property double mLastEpoch: 0
+  property double nowEpoch: 0
+  property var    repoSnapshots: []
+  property bool   repoLoading: false
+  property string repoError: ""
+  property var    snapshotPaths: ({})
+
+  // ---- anomaly detection --------------------------------------------------
+  // Compare the latest run against the mean and standard deviation of the runs
+  // before it. Two sigma on either duration or data added is worth a word: a
+  // run that suddenly takes far longer, or ships far more, is usually the first
+  // visible sign of something changing (a new large directory, a repo needing a
+  // prune, a link gone slow). Deliberately advisory, never an alarm — this is a
+  // small sample and normal days vary.
+  readonly property var forecast: {
+    var ok = []
+    for (var i = 0; i < mRuns.length; i++) if (mRuns[i].ok && mRuns[i].dur > 0) ok.push(mRuns[i])
+    if (ok.length < 5) return { have: false, notes: [] }
+
+    var hist = ok.slice(0, ok.length - 1)
+    var last = ok[ok.length - 1]
+
+    function stats(pick) {
+      var n = hist.length, sum = 0
+      for (var i = 0; i < n; i++) sum += pick(hist[i])
+      var mean = sum / n, v = 0
+      for (var j = 0; j < n; j++) { var d = pick(hist[j]) - mean; v += d * d }
+      return { mean: mean, sd: Math.sqrt(v / n) }
+    }
+
+    var d = stats(function(r) { return r.dur })
+    var a = stats(function(r) { return r.added })
+    var notes = []
+
+    if (d.sd > 0 && Math.abs(last.dur - d.mean) > 2 * d.sd)
+      notes.push((last.dur > d.mean ? "Slower" : "Faster") + " than usual: "
+                 + root.humanDur(last.dur) + " vs " + root.humanDur(d.mean) + " typical")
+    if (a.sd > 0 && Math.abs(last.added - a.mean) > 2 * a.sd)
+      notes.push((last.added > a.mean ? "Larger" : "Smaller") + " than usual: "
+                 + root.humanBytes(last.added) + " vs " + root.humanBytes(a.mean) + " typical")
+
+    var fails = 0
+    for (var k = 0; k < mRuns.length; k++) if (!mRuns[k].ok) fails++
+    if (fails > 0) notes.push(fails + (fails === 1 ? " failed run" : " failed runs") + " in the log")
+
+    return { have: true, notes: notes, meanDur: d.mean, meanAdded: a.mean, samples: hist.length }
+  }
 
   function humanBytes(b) {
     b = Number(b) || 0
@@ -70,7 +120,13 @@ Panel {
     mRepoBytes = Number(m.repoBytes || 0)
     mRepoBlobs = Number(m.repoBlobs || 0)
     mIface = m.iface || ""
-    mHistory = m.history || []
+    mRuns = m.runs || []
+    mCalendar = m.calendar || []
+    mNextEpoch = Number(m.nextEpoch || 0)
+    mLastEpoch = Number(m.lastEpoch || 0)
+    nowEpoch = Number(m.now || 0)
+    // The history chart reads the same run records.
+    mHistory = mRuns
   }
 
   property string actionNote: ""
@@ -207,6 +263,63 @@ Panel {
       refreshDelay.restart()
     }
   }
+  // Drives the countdown ring. A plain 1 Hz tick — the ring repaints on a data
+  // change, which is what a new second is, rather than animating per frame.
+  Timer {
+    interval: 1000
+    running: root.opened
+    repeat: true
+    onTriggered: root.nowEpoch = root.nowEpoch + 1
+  }
+
+  // Repository queries. Both hit B2 through pkexec and are user-initiated only.
+  Process {
+    id: snapshotsProc
+    command: [root.pluginDir + "/metrics", "--snapshots"]
+    onRunningChanged: if (running) { root.repoLoading = true; root.repoError = "" }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var arr = JSON.parse(text)
+          root.repoSnapshots = Array.isArray(arr) ? arr : []
+          if (root.repoSnapshots.length === 0) root.repoError = "Repository returned no snapshots"
+        } catch (e) { root.repoError = "Could not read snapshot list" }
+      }
+    }
+    onExited: function(code) {
+      root.repoLoading = false
+      if (code !== 0 && root.repoSnapshots.length === 0)
+        root.repoError = code === 126 ? "Authentication declined" : "Repository query failed"
+    }
+  }
+
+  Process {
+    id: lsProc
+    property string forId: ""
+    command: [root.pluginDir + "/metrics", "--ls", lsProc.forId]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // `restic ls --json` streams one object per line: a snapshot header
+        // then a node per entry. Only top-level paths are interesting here.
+        var top = []
+        var lines = text.split("\n")
+        for (var i = 0; i < lines.length; i++) {
+          if (lines[i].trim() === "") continue
+          try {
+            var o = JSON.parse(lines[i])
+            if (o.path && o.path.split("/").length === 2) top.push(o.path)
+          } catch (e) { /* header lines and partials are expected */ }
+        }
+        var m = ({})
+        for (var k in root.snapshotPaths) m[k] = root.snapshotPaths[k]
+        m[lsProc.forId] = top
+        root.snapshotPaths = m
+      }
+    }
+  }
+
   Timer {
     id: refreshDelay
     interval: 1500
@@ -238,6 +351,18 @@ Panel {
           width: Style.space(5); height: width; radius: width / 2
           color: root.state === "failed" ? "#ff4d4d" : root.state === "healthy" ? "#39d353" : "#f5c542"
         }
+
+        // Last seven runs as a micro chart, so the trend is readable from the
+        // bar without opening anything.
+        Sparkline {
+          anchors.left: parent.left
+          anchors.bottom: parent.bottom
+          anchors.bottomMargin: 1
+          width: Style.space(14)
+          height: Style.space(9)
+          runs: root.mRuns
+          accent: root.state === "failed" ? "#ff4d4d" : "#39d353"
+        }
       }
     }
     onPressed: function(buttonCode) {
@@ -253,8 +378,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(430))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(600))
+    contentWidth: panel.fittedContentWidth(Style.space(500))
+    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(820))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -308,13 +433,31 @@ Panel {
             fontFamily: root.fontFamily
           }
 
-          ThroughputGraph {
-            id: throughput
+          RowLayout {
             Layout.fillWidth: true
-            active: root.state === "running"
-            accent: root.state === "running" ? "#39d353" : Color.accent
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            spacing: Style.space(12)
+
+            ThroughputGraph {
+              id: throughput
+              Layout.fillWidth: true
+              active: root.state === "running"
+              accent: root.state === "running" ? "#39d353" : Color.accent
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            NextRunRing {
+              Layout.alignment: Qt.AlignVCenter
+              Layout.preferredWidth: Style.space(62)
+              Layout.preferredHeight: Style.space(62)
+              nextEpoch: root.mNextEpoch
+              lastEpoch: root.mLastEpoch
+              nowEpoch: root.nowEpoch
+              running: root.state === "running"
+              accent: Color.accent
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
           }
 
           Text {
@@ -389,6 +532,62 @@ Panel {
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
+          }
+
+          // Advisory anomaly notes. Absent entirely when the latest run looks
+          // like every other run, which is the common case.
+          Repeater {
+            model: root.forecast.have ? root.forecast.notes : []
+            Text {
+              required property var modelData
+              Layout.fillWidth: true
+              text: "▲  " + modelData
+              color: "#f5c542"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+          }
+          Text {
+            Layout.fillWidth: true
+            visible: root.forecast.have && root.forecast.notes.length === 0
+            text: "✓  In line with the previous " + root.forecast.samples + " runs ("
+                  + root.humanDur(root.forecast.meanDur) + " / "
+                  + root.humanBytes(root.forecast.meanAdded) + " typical)"
+            color: "#39d353"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+          PanelSectionHeader { Layout.fillWidth: true; text: "BACKUP CALENDAR"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+          Heatmap {
+            Layout.fillWidth: true
+            calendar: root.mCalendar
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+          PanelSectionHeader { Layout.fillWidth: true; text: "SNAPSHOTS"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+          SnapshotList {
+            Layout.fillWidth: true
+            runs: root.mRuns
+            repoSnapshots: root.repoSnapshots
+            loading: root.repoLoading
+            errorText: root.repoError
+            pathsById: root.snapshotPaths
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onLoadRepoRequested: if (!snapshotsProc.running) snapshotsProc.running = true
+            onListPathsRequested: function(id) {
+              if (lsProc.running) return
+              lsProc.forId = id
+              lsProc.running = true
+            }
           }
 
           PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }

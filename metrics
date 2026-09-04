@@ -1,29 +1,28 @@
 #!/usr/bin/env bash
 # Telemetry for the Restic backup panel's visualisations.
 #
-# Two modes:
-#   metrics            one-shot JSON: last-run stats, repo totals, run history
-#   metrics --stream   one JSON line per second: live network throughput
+#   metrics              one-shot JSON: last-run stats, repo totals, per-run
+#                        history, 90-day outcome calendar, schedule epochs
+#   metrics --stream     one JSON line per second: live network throughput
+#   metrics --snapshots  authoritative snapshot list straight from the repo
+#   metrics --ls <id>    top-level paths inside one snapshot
 #
-# Everything here is readable as an unprivileged user. The backup itself runs
-# as root, but /var/log/restic-backup.log is world-readable (644),
-# /proc/net/dev is world-readable, and journalctl serves the unit to members of
-# wheel. Nothing in this script needs sudo, and it must stay that way — a bar
-# widget escalating privileges to draw a chart would be a bad trade.
+# The default and --stream modes are strictly unprivileged: the backup runs as
+# root, but /var/log/restic-backup.log is world-readable (644), /proc/net/dev is
+# world-readable, and journalctl serves the unit to wheel. Only --snapshots and
+# --ls escalate, because the repository password lives in root-only
+# /root/.restic-env, and they do it on explicit user action rather than on a
+# timer — a bar widget must never poll B2 behind your back or hold credentials.
 set -uo pipefail
 
 LOG=/var/log/restic-backup.log
 
-# The interface carrying B2 traffic. Derived from the default route rather than
-# hardcoded, so this keeps working on a different machine or if wlo1 is renamed.
 default_iface() {
-  ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
+  ip route show default 2>/dev/null \
+    | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
 }
 
 # ---------------------------------------------------------------- stream mode
-# Emits {"tx":<bytes/s>,"rx":<bytes/s>} once a second. The panel drives its
-# throughput graph off this instead of re-spawning a process per sample: one
-# long-lived reader is far cheaper than 60 fork/exec cycles a minute.
 if [[ "${1:-}" == "--stream" ]]; then
   iface=$(default_iface)
   [[ -z "$iface" ]] && { echo '{"error":"no default route"}'; exit 1; }
@@ -36,8 +35,6 @@ if [[ "${1:-}" == "--stream" ]]; then
   read -r prev_rx prev_tx < <(read_counters)
   while sleep 1; do
     read -r cur_rx cur_tx < <(read_counters)
-    # Counters are 64-bit on modern kernels but can reset if the interface is
-    # re-created; clamp negatives to 0 rather than emitting a huge spike.
     d_rx=$(( cur_rx - prev_rx )); (( d_rx < 0 )) && d_rx=0
     d_tx=$(( cur_tx - prev_tx )); (( d_tx < 0 )) && d_tx=0
     prev_rx=$cur_rx; prev_tx=$cur_tx
@@ -46,116 +43,179 @@ if [[ "${1:-}" == "--stream" ]]; then
   exit 0
 fi
 
-# ------------------------------------------------------------- one-shot stats
-# Convert restic's human sizes ("3.312 GiB") to bytes so the panel can do maths
-# and pick its own units.
-to_bytes() {
-  awk -v v="$1" -v u="$2" 'BEGIN{
-    m = (u=="KiB")?1024 : (u=="MiB")?1048576 : (u=="GiB")?1073741824 : (u=="TiB")?1099511627776 : 1
-    printf "%.0f", v*m
-  }'
-}
-
-# restic prints "1:44" or "1:02:33"; normalise to seconds.
-dur_to_sec() {
-  awk -F: '{ if (NF==3) print $1*3600+$2*60+$3; else if (NF==2) print $1*60+$2; else print $1+0 }' <<<"$1"
-}
-
-files_new=0; files_changed=0; files_unmodified=0
-dirs_new=0; dirs_changed=0; dirs_unmodified=0
-added_bytes=0; stored_bytes=0
-processed_files=0; processed_bytes=0; duration_sec=0
-repo_blobs=0; repo_bytes=0
-snapshot=""
-
-if [[ -r "$LOG" ]]; then
-  # Only the most recent run block. tac/sed/tac is far cheaper than parsing a
-  # half-megabyte log twice.
-  last_run=$(tac "$LOG" 2>/dev/null | sed '/^=== Backup started:/q' | tac)
-
-  read -r files_new files_changed files_unmodified < <(
-    grep -m1 '^Files:' <<<"$last_run" \
-    | sed -n 's/^Files:[[:space:]]*\([0-9]*\) new,[[:space:]]*\([0-9]*\) changed,[[:space:]]*\([0-9]*\) unmodified.*/\1 \2 \3/p')
-  read -r dirs_new dirs_changed dirs_unmodified < <(
-    grep -m1 '^Dirs:' <<<"$last_run" \
-    | sed -n 's/^Dirs:[[:space:]]*\([0-9]*\) new,[[:space:]]*\([0-9]*\) changed,[[:space:]]*\([0-9]*\) unmodified.*/\1 \2 \3/p')
-
-  # "Added to the repository: 3.312 GiB (1.714 GiB stored)" — the gap between
-  # the two numbers is compression+dedup, which is the interesting figure.
-  read -r a_val a_unit s_val s_unit < <(
-    grep -m1 'Added to the repository:' <<<"$last_run" \
-    | sed -n 's/.*repository:[[:space:]]*\([0-9.]*\) \([KMGT]iB\) (\([0-9.]*\) \([KMGT]iB\) stored).*/\1 \2 \3 \4/p')
-  [[ -n "${a_val:-}" ]] && added_bytes=$(to_bytes "$a_val" "$a_unit")
-  [[ -n "${s_val:-}" ]] && stored_bytes=$(to_bytes "$s_val" "$s_unit")
-
-  # "processed 706897 files, 67.864 GiB in 1:44"
-  read -r p_files p_val p_unit p_dur < <(
-    grep -m1 '^processed ' <<<"$last_run" \
-    | sed -n 's/^processed \([0-9]*\) files, \([0-9.]*\) \([KMGT]iB\) in \([0-9:]*\).*/\1 \2 \3 \4/p')
-  if [[ -n "${p_files:-}" ]]; then
-    processed_files=$p_files
-    processed_bytes=$(to_bytes "$p_val" "$p_unit")
-    duration_sec=$(dur_to_sec "$p_dur")
-  fi
-
-  snapshot=$(grep -oP 'snapshot \K[0-9a-f]{8}(?= saved)' <<<"$last_run" | tail -1)
-
-  # Repo totals come from the prune stage: "remaining: N blobs / X GiB".
-  read -r r_blobs r_val r_unit < <(
-    grep -m1 '^remaining:' <<<"$last_run" \
-    | sed -n 's/^remaining:[[:space:]]*\([0-9]*\) blobs \/ \([0-9.]*\) \([KMGT]iB\).*/\1 \2 \3/p')
-  [[ -n "${r_blobs:-}" ]] && { repo_blobs=$r_blobs; repo_bytes=$(to_bytes "$r_val" "$r_unit"); }
+# ------------------------------------------------------- privileged repo reads
+# Both of these hit Backblaze over the network and need the repo password, so
+# they are on-demand only and never called from a timer.
+if [[ "${1:-}" == "--snapshots" ]]; then
+  pkexec bash -c 'set -a; . /root/.restic-env; set +a; exec restic snapshots --json' 2>/dev/null \
+    || echo '[]'
+  exit 0
 fi
 
-# ---- run history -----------------------------------------------------------
-# One entry per completed run: duration and bytes added, newest last. Drives the
-# history bar chart. Parsed in a single awk pass over the log.
-history_json=$(awk '
-  /^=== Backup started:/ { added=0; dur=0; ok=0; have=0 }
-  /^Added to the repository:/ {
-    v=$5; u=$6
-    m = (u=="KiB")?1024 : (u=="MiB")?1048576 : (u=="GiB")?1073741824 : (u=="TiB")?1099511627776 : 1
-    added = v*m; have=1
-  }
-  /^processed .* files, .* in / {
-    n=split($NF,t,":")
-    dur = (n==3)? t[1]*3600+t[2]*60+t[3] : (n==2)? t[1]*60+t[2] : t[1]
-  }
-  /^=== Backup completed:/ {
-    if (have) { printf "%s{\"added\":%.0f,\"dur\":%d}", (c++?",":""), added, dur }
-  }
-  END{}
-' "$LOG" 2>/dev/null | tail -c 4000)
+if [[ "${1:-}" == "--ls" ]]; then
+  id="${2:-}"
+  # Only ever pass a validated short/long restic id to a privileged shell.
+  [[ "$id" =~ ^[0-9a-f]{8,64}$ ]] || { echo '[]'; exit 1; }
+  pkexec bash -c 'set -a; . /root/.restic-env; set +a; exec restic ls --json "$1"' _ "$id" 2>/dev/null \
+    || echo '[]'
+  exit 0
+fi
 
-# tail -c can slice mid-object; drop a leading partial entry if present.
-history_json="${history_json#*\},}"
-[[ "$history_json" != \{* ]] && history_json=""
+# ------------------------------------------------------------- one-shot stats
+# The log parse is genuinely awkward in awk (multi-line records, human sizes,
+# locale timestamps), so it is one embedded python pass instead. Native tools
+# first, but not past the point where they stop being readable.
+schedule=$( { systemctl show vic-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null
+              systemctl show vic-backup.timer -p LastTriggerUSec --value 2>/dev/null; } | head -2 )
+next_raw=$(sed -n 1p <<<"$schedule")
+last_raw=$(sed -n 2p <<<"$schedule")
+next_epoch=$(date -d "$next_raw" +%s 2>/dev/null || echo 0)
+last_epoch=$(date -d "$last_raw" +%s 2>/dev/null || echo 0)
 
-iface=$(default_iface)
+IFACE=$(default_iface) \
+NEXT_EPOCH="${next_epoch:-0}" \
+LAST_EPOCH="${last_epoch:-0}" \
+LOG="$LOG" \
+python3 - <<'PY'
+import json, os, re, subprocess, time
 
-jq -n \
-  --argjson filesNew "${files_new:-0}" \
-  --argjson filesChanged "${files_changed:-0}" \
-  --argjson filesUnmodified "${files_unmodified:-0}" \
-  --argjson dirsNew "${dirs_new:-0}" \
-  --argjson dirsChanged "${dirs_changed:-0}" \
-  --argjson addedBytes "${added_bytes:-0}" \
-  --argjson storedBytes "${stored_bytes:-0}" \
-  --argjson processedFiles "${processed_files:-0}" \
-  --argjson processedBytes "${processed_bytes:-0}" \
-  --argjson durationSec "${duration_sec:-0}" \
-  --argjson repoBlobs "${repo_blobs:-0}" \
-  --argjson repoBytes "${repo_bytes:-0}" \
-  --arg snapshot "${snapshot:-}" \
-  --arg iface "${iface:-}" \
-  --argjson history "[${history_json}]" \
-  '{
-     filesNew:$filesNew, filesChanged:$filesChanged, filesUnmodified:$filesUnmodified,
-     dirsNew:$dirsNew, dirsChanged:$dirsChanged,
-     addedBytes:$addedBytes, storedBytes:$storedBytes,
-     processedFiles:$processedFiles, processedBytes:$processedBytes,
-     durationSec:$durationSec,
-     repoBlobs:$repoBlobs, repoBytes:$repoBytes,
-     snapshot:$snapshot, iface:$iface,
-     history:$history
-   }'
+log = os.environ["LOG"]
+UNITS = {"B":1, "KiB":1024, "MiB":1048576, "GiB":1073741824, "TiB":1099511627776}
+
+def to_bytes(val, unit):
+    try: return int(float(val) * UNITS.get(unit, 1))
+    except Exception: return 0
+
+# date(1) handles the log's "Thu Sep  3 01:00:01 AM EDT 2026" including the
+# locale AM/PM and zone abbreviation; reimplementing that in python would be
+# worse. Cached, because runs repeat dates rarely but parsing is a fork.
+_date_cache = {}
+def to_epoch(s):
+    s = s.strip()
+    if s in _date_cache: return _date_cache[s]
+    try:
+        out = subprocess.run(["date", "-d", s, "+%s"], capture_output=True,
+                             text=True, timeout=5)
+        v = int(out.stdout.strip()) if out.returncode == 0 else 0
+    except Exception:
+        v = 0
+    _date_cache[s] = v
+    return v
+
+RE_START = re.compile(r'^=== Backup started: (.+) ===')
+RE_DONE  = re.compile(r'^=== Backup completed: (.+) ===')
+RE_FILES = re.compile(r'^Files:\s+(\d+) new,\s+(\d+) changed,\s+(\d+) unmodified')
+RE_DIRS  = re.compile(r'^Dirs:\s+(\d+) new,\s+(\d+) changed,\s+(\d+) unmodified')
+RE_ADDED = re.compile(r'^Added to the repository: ([\d.]+) (\w+)\s+\(([\d.]+) (\w+) stored\)')
+RE_PROC  = re.compile(r'^processed (\d+) files, ([\d.]+) (\w+) in ([\d:]+)')
+RE_SNAP  = re.compile(r'snapshot ([0-9a-f]{8}) saved')
+RE_REMAIN= re.compile(r'^remaining:\s+(\d+) blobs / ([\d.]+) (\w+)')
+
+def dur_to_sec(t):
+    p = [int(x) for x in t.split(":")]
+    if len(p) == 3: return p[0]*3600 + p[1]*60 + p[2]
+    if len(p) == 2: return p[0]*60 + p[1]
+    return p[0] if p else 0
+
+runs, cur = [], None
+repo_blobs = repo_bytes = 0
+
+try:
+    with open(log, "r", errors="replace") as fh:
+        for line in fh:
+            m = RE_START.match(line)
+            if m:
+                # A run that never reached "completed" is a failure; keep it so
+                # the calendar and the forecast can see it.
+                if cur is not None:
+                    cur["ok"] = False
+                    runs.append(cur)
+                cur = {"startRaw": m.group(1), "ok": False, "added": 0, "stored": 0,
+                       "dur": 0, "filesNew": 0, "filesChanged": 0,
+                       "filesUnmodified": 0, "processedFiles": 0,
+                       "processedBytes": 0, "snapshot": ""}
+                continue
+            if cur is None:
+                continue
+
+            m = RE_FILES.match(line)
+            if m:
+                cur["filesNew"], cur["filesChanged"], cur["filesUnmodified"] = map(int, m.groups())
+                continue
+            m = RE_ADDED.match(line)
+            if m:
+                cur["added"] = to_bytes(m.group(1), m.group(2))
+                cur["stored"] = to_bytes(m.group(3), m.group(4))
+                continue
+            m = RE_PROC.match(line)
+            if m:
+                cur["processedFiles"] = int(m.group(1))
+                cur["processedBytes"] = to_bytes(m.group(2), m.group(3))
+                cur["dur"] = dur_to_sec(m.group(4))
+                continue
+            m = RE_SNAP.search(line)
+            if m:
+                cur["snapshot"] = m.group(1)
+                continue
+            m = RE_REMAIN.match(line)
+            if m:
+                repo_blobs = int(m.group(1))
+                repo_bytes = to_bytes(m.group(2), m.group(3))
+                continue
+            m = RE_DONE.match(line)
+            if m:
+                cur["ok"] = True
+                cur["endRaw"] = m.group(1)
+                runs.append(cur)
+                cur = None
+except FileNotFoundError:
+    pass
+
+if cur is not None:
+    runs.append(cur)   # in-flight or crashed run
+
+# Resolve timestamps only for runs we keep, newest 60.
+runs = runs[-60:]
+for r in runs:
+    r["ts"] = to_epoch(r.get("endRaw") or r.get("startRaw", ""))
+    r.pop("startRaw", None)
+    r.pop("endRaw", None)
+
+last = runs[-1] if runs else {}
+
+# ---- 90-day outcome calendar ----------------------------------------------
+# One entry per day that had at least one run: worst outcome wins, so a day with
+# a failure reads as failed even if a later manual run succeeded.
+day = {}
+for r in runs:
+    if not r["ts"]:
+        continue
+    key = time.strftime("%Y-%m-%d", time.localtime(r["ts"]))
+    d = day.setdefault(key, {"date": key, "runs": 0, "ok": True, "added": 0})
+    d["runs"] += 1
+    d["added"] += r["added"]
+    if not r["ok"]:
+        d["ok"] = False
+calendar = [day[k] for k in sorted(day)]
+
+out = {
+    "filesNew": last.get("filesNew", 0),
+    "filesChanged": last.get("filesChanged", 0),
+    "filesUnmodified": last.get("filesUnmodified", 0),
+    "addedBytes": last.get("added", 0),
+    "storedBytes": last.get("stored", 0),
+    "processedFiles": last.get("processedFiles", 0),
+    "processedBytes": last.get("processedBytes", 0),
+    "durationSec": last.get("dur", 0),
+    "snapshot": last.get("snapshot", ""),
+    "repoBlobs": repo_blobs,
+    "repoBytes": repo_bytes,
+    "iface": os.environ.get("IFACE", ""),
+    "nextEpoch": int(os.environ.get("NEXT_EPOCH") or 0),
+    "lastEpoch": int(os.environ.get("LAST_EPOCH") or 0),
+    "now": int(time.time()),
+    "runs": runs,
+    "calendar": calendar,
+}
+print(json.dumps(out))
+PY

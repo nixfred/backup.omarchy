@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "pi.backup-monitor",
   "name": "Backup Sizzle",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": "Fred",
   "license": "MIT",
-  "description": "Restic backup with a live network throughput graph, dedup and churn meters, and a per-run history chart.",
+  "description": "Restic backup with live B2 throughput, countdown ring, outcome calendar, anomaly notes, snapshot browser and run history.",
   "kinds": [
     "bar-widget"
   ],
