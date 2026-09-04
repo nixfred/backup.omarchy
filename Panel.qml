@@ -476,11 +476,24 @@ Panel {
             }
 
             Item { Layout.fillWidth: true }
+          }
 
-            // Countdown lives here rather than beside the graph: sharing a row
-            // with a fillWidth Canvas pushed it past the panel's right edge.
+          // The countdown gets its own row. It was tried beside the throughput
+          // graph (pushed past the panel edge) and inside the stats row (squeezed
+          // "67.86 GiB" down to "iiB"): at this panel width nothing else can
+          // share a line with it.
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(10)
+
+            Text {
+              text: root.state === "running" ? "Backup in progress" : "Next scheduled run"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            Item { Layout.fillWidth: true }
             NextRunRing {
-              Layout.alignment: Qt.AlignVCenter
               Layout.preferredWidth: Style.space(58)
               Layout.preferredHeight: Style.space(58)
               nextEpoch: root.mNextEpoch
