@@ -391,14 +391,46 @@ Panel {
         else if (t === "b" || t === "B") root.startBackup()
       }
 
-      Flickable {
+      // The panel is a scrolling body with a PINNED action footer. "Back up
+      // now" is the one control here that must never require a scroll to
+      // reach: the body runs ~2500px against a ~990px viewport, so anything
+      // laid out after the history sections is effectively invisible.
+      ColumnLayout {
         anchors.fill: parent
+        spacing: Style.space(10)
+
+      Flickable {
+        id: scroller
+        Layout.fillWidth: true
+        Layout.fillHeight: true
         contentWidth: width
         contentHeight: content.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
-        interactive: contentHeight > height
+        // NOT interactive: wheel scrolling is MouseArea.onWheel below, and an
+        // interactive Flickable grabs every drag — a slightly-moving click on
+        // a snapshot row or the calendar became a flick instead of a click.
+        interactive: false
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        // MouseArea.onWheel, NOT WheelHandler. Instrumentation on Blip proved
+        // WheelHandler never receives a single event on this Quickshell/Wayland
+        // stack; Omarchy's own panels use MouseArea.onWheel and it works.
+        // Direct 1:1 application — no easing — because hi-res wheels (MX
+        // Master) are smooth by hardware and animating on top of the event
+        // flood reads as broken. NoButton + z:-1 so it never steals clicks or
+        // hover from the rows above it.
+        MouseArea {
+          anchors.fill: parent
+          z: -1
+          acceptedButtons: Qt.NoButton
+          onWheel: function(wheel) {
+            var d = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y * 3.0 : wheel.angleDelta.y * 4.5
+            var max = Math.max(0, scroller.contentHeight - scroller.height)
+            scroller.contentY = Math.max(0, Math.min(max, scroller.contentY - d))
+            wheel.accepted = true
+          }
+        }
 
         ColumnLayout {
           id: content
@@ -622,20 +654,6 @@ Panel {
           Text { Layout.fillWidth: true; text: "Next: " + (root.nextRun || "unknown"); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
           Text { Layout.fillWidth: true; visible: root.failures7d > 0; text: root.failures7d + (root.failures7d === 1 ? " historical failure" : " historical failures") + " in the last 7 days; latest run is " + root.result; color: root.state === "failed" ? root.urgent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
 
-          RowLayout {
-            id: backupAction
-            Layout.fillWidth: true
-            PanelActionButton { enabled: root.state !== "running"; iconText: "󰑐"; tooltipText: root.state === "running" ? "Backup already running" : "Back up now"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.startBackup() }
-            Text { text: "Back up now"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
-            Item { Layout.fillWidth: true }
-            Text { text: "B"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
-            TapHandler {
-              enabled: root.state !== "running"
-              acceptedButtons: Qt.LeftButton
-              onTapped: root.startBackup()
-            }
-          }
-          Text { Layout.fillWidth: true; visible: root.statusError !== "" || root.actionNote !== ""; text: root.statusError !== "" ? root.statusError : root.actionNote; color: root.statusError !== "" ? root.urgent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
 
           PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
           PanelSectionHeader { Layout.fillWidth: true; text: "RECENT HISTORY"; foreground: root.foreground; fontFamily: root.fontFamily }
@@ -650,6 +668,26 @@ Panel {
           }
           Text { Layout.fillWidth: true; text: "Right-click the bar icon or press R to refresh"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
         }
+      }
+
+      // ---- Pinned footer: always reachable, never scrolls away ----
+      PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
+
+      RowLayout {
+        id: backupAction
+        Layout.fillWidth: true
+        PanelActionButton { enabled: root.state !== "running"; iconText: "󰑐"; tooltipText: root.state === "running" ? "Backup already running" : "Back up now"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.startBackup() }
+        Text { text: root.state === "running" ? "Backup running" : "Back up now"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+        Item { Layout.fillWidth: true }
+        Text { text: "B"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+        TapHandler {
+          enabled: root.state !== "running"
+          acceptedButtons: Qt.LeftButton
+          onTapped: root.startBackup()
+        }
+      }
+
+      Text { Layout.fillWidth: true; visible: root.statusError !== "" || root.actionNote !== ""; text: root.statusError !== "" ? root.statusError : root.actionNote; color: root.statusError !== "" ? root.urgent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap }
       }
     }
   }
