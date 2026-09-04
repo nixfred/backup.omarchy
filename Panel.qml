@@ -673,17 +673,61 @@ Panel {
       // ---- Pinned footer: always reachable, never scrolls away ----
       PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
 
-      RowLayout {
+      // The WHOLE row is the button, not just the icon.
+      //
+      // MouseArea, NOT TapHandler: PanelActionButton owns a real MouseArea, so
+      // the icon was the only live hit area while the row's TapHandler never
+      // fired — the same pointer-handler dead end as the WheelHandler on this
+      // Quickshell/Wayland stack. Omarchy's own clickable rows (bluetooth
+      // Panel.qml:933) use MouseArea with hoverEnabled + PointingHandCursor;
+      // this matches that. The hover wash and the pointer cursor exist so the
+      // row LOOKS clickable across its full width, not just under the icon.
+      Rectangle {
         id: backupAction
         Layout.fillWidth: true
-        PanelActionButton { enabled: root.state !== "running"; iconText: "󰑐"; tooltipText: root.state === "running" ? "Backup already running" : "Back up now"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.startBackup() }
-        Text { text: root.state === "running" ? "Backup running" : "Back up now"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
-        Item { Layout.fillWidth: true }
-        Text { text: "B"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
-        TapHandler {
-          enabled: root.state !== "running"
+        implicitHeight: backupRow.implicitHeight + Style.space(10)
+        radius: Style.space(6)
+        // The icon's own MouseArea steals hover when the pointer crosses it,
+        // which made the row wash flicker off exactly where the button is.
+        // Track both and treat either as "the row is hot".
+        property bool iconHot: false
+        readonly property bool hot: (rowMouse.containsMouse || iconHot) && root.state !== "running"
+        color: hot ? Util.alpha(root.foreground, 0.08) : "transparent"
+
+        MouseArea {
+          id: rowMouse
+          anchors.fill: parent
+          hoverEnabled: true
           acceptedButtons: Qt.LeftButton
-          onTapped: root.startBackup()
+          cursorShape: root.state !== "running" ? Qt.PointingHandCursor : Qt.ArrowCursor
+          onClicked: if (root.state !== "running") root.startBackup()
+        }
+
+        RowLayout {
+          id: backupRow
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: Style.space(4)
+          anchors.rightMargin: Style.space(4)
+
+          // The RowLayout is declared after rowMouse, so this button's own
+          // MouseArea sits ON TOP and keeps taking clicks over the icon —
+          // which is fine, both paths call startBackup(). It also keeps the
+          // tooltip. Everywhere else on the row, rowMouse gets the click.
+          PanelActionButton {
+            enabled: root.state !== "running"
+            iconText: "󰑐"
+            tooltipText: root.state === "running" ? "Backup already running" : "Back up now"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            hasCursor: backupAction.hot
+            onClicked: root.startBackup()
+            onHovered: function(isHovered) { backupAction.iconHot = isHovered }
+          }
+          Text { text: root.state === "running" ? "Backup running" : "Back up now"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+          Item { Layout.fillWidth: true }
+          Text { text: "B"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
         }
       }
 
