@@ -15,6 +15,9 @@
 # timer — a bar widget must never poll B2 behind your back or hold credentials.
 set -uo pipefail
 
+# Units are named after the host (vic-backup on vic, dex-backup on dex).
+unit="${BACKUP_MONITOR_UNIT:-$(hostname)-backup}"
+
 LOG=/var/log/restic-backup.log
 
 default_iface() {
@@ -65,8 +68,8 @@ fi
 # The log parse is genuinely awkward in awk (multi-line records, human sizes,
 # locale timestamps), so it is one embedded python pass instead. Native tools
 # first, but not past the point where they stop being readable.
-schedule=$( { systemctl show vic-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null
-              systemctl show vic-backup.timer -p LastTriggerUSec --value 2>/dev/null; } | head -2 )
+schedule=$( { systemctl show ${unit}.timer -p NextElapseUSecRealtime --value 2>/dev/null
+              systemctl show ${unit}.timer -p LastTriggerUSec --value 2>/dev/null; } | head -2 )
 next_raw=$(sed -n 1p <<<"$schedule")
 last_raw=$(sed -n 2p <<<"$schedule")
 next_epoch=$(date -d "$next_raw" +%s 2>/dev/null || echo 0)
