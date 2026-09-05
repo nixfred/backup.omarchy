@@ -1,18 +1,20 @@
 {
   "schemaVersion": 1,
   "id": "pi.backup-monitor",
-  "name": "Backup Monitor",
-  "version": "1.0.0",
+  "name": "Backup Sizzle",
+  "version": "3.0.0",
   "author": "Fred",
   "license": "MIT",
-  "description": "Live status, schedule, history, and manual start controls for the Vic restic backup.",
-  "kinds": ["bar-widget"],
+  "description": "Restic backup with live B2 throughput, countdown ring, outcome calendar, anomaly notes, snapshot browser and run history.",
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Backup Monitor",
-    "description": "Monitor vic-backup.service and start a backup from the Omarchy bar.",
+    "displayName": "Backup Sizzle",
+    "description": "Live B2 upload graph, dedup/churn visualisation, run history, and manual start.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
