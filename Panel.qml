@@ -13,6 +13,7 @@ Panel {
   manageIpc: false
 
   property string state: "unknown"
+  property string unit: "vic-backup"
   property string timerActive: "unknown"
   property string serviceActive: "unknown"
   property string result: "unknown"
@@ -37,6 +38,7 @@ Panel {
     var previousState = state
     statusError = ""
     state = s.state || "unknown"
+    unit = s.unit || unit
     timerActive = s.timerActive || "unknown"
     serviceActive = s.serviceActive || "unknown"
     result = s.result || "unknown"
@@ -113,7 +115,7 @@ Panel {
 
   Process {
     id: startProc
-    command: ["pkexec", "systemctl", "start", "--no-block", "vic-backup.service"]
+    command: ["pkexec", "systemctl", "start", "--no-block", root.unit + ".service"]
     property string errorText: ""
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: startProc.errorText = text.trim() }
     onExited: function(exitCode) {
