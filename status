@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-timer_active=$(systemctl is-active vic-backup.timer 2>/dev/null || true)
-timer_enabled=$(systemctl is-enabled vic-backup.timer 2>/dev/null || true)
-service_active=$(systemctl is-active vic-backup.service 2>/dev/null || true)
-result=$(systemctl show vic-backup.service -p Result --value 2>/dev/null || true)
-timer_load=$(systemctl show vic-backup.timer -p LoadState --value 2>/dev/null || true)
-service_load=$(systemctl show vic-backup.service -p LoadState --value 2>/dev/null || true)
-persistent=$(systemctl show vic-backup.timer -p Persistent --value 2>/dev/null || true)
-last_trigger=$(systemctl show vic-backup.timer -p LastTriggerUSec --value 2>/dev/null || true)
-next_run=$(systemctl show vic-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
-started=$(systemctl show vic-backup.service -p ExecMainStartTimestamp --value 2>/dev/null || true)
-recent_log=$(journalctl -u vic-backup.service --since '90 days ago' --no-pager -o cat 2>/dev/null || true)
+# The backup units are named after the host they run on (vic-backup on vic,
+# dex-backup on dex). Override with BACKUP_MONITOR_UNIT if they ever diverge.
+unit="${BACKUP_MONITOR_UNIT:-$(hostname)-backup}"
+
+timer_active=$(systemctl is-active ${unit}.timer 2>/dev/null || true)
+timer_enabled=$(systemctl is-enabled ${unit}.timer 2>/dev/null || true)
+service_active=$(systemctl is-active ${unit}.service 2>/dev/null || true)
+result=$(systemctl show ${unit}.service -p Result --value 2>/dev/null || true)
+timer_load=$(systemctl show ${unit}.timer -p LoadState --value 2>/dev/null || true)
+service_load=$(systemctl show ${unit}.service -p LoadState --value 2>/dev/null || true)
+persistent=$(systemctl show ${unit}.timer -p Persistent --value 2>/dev/null || true)
+last_trigger=$(systemctl show ${unit}.timer -p LastTriggerUSec --value 2>/dev/null || true)
+next_run=$(systemctl show ${unit}.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
+started=$(systemctl show ${unit}.service -p ExecMainStartTimestamp --value 2>/dev/null || true)
+recent_log=$(journalctl -u ${unit}.service --since '90 days ago' --no-pager -o cat 2>/dev/null || true)
 completed=$(printf '%s\n' "$recent_log" | sed -n 's/^=== Backup completed: \(.*\) ===$/\1/p' | tail -1)
 snapshot=$(printf '%s\n' "$recent_log" | sed -n 's/.*snapshot \([0-9a-f]\{8\}\) saved.*/\1/p' | tail -1)
-failures=$(journalctl -u vic-backup.service --since '7 days ago' --no-pager -o cat 2>/dev/null \
+failures=$(journalctl -u ${unit}.service --since '7 days ago' --no-pager -o cat 2>/dev/null \
   | rg -c "Failed with result" || true)
-history=$(journalctl -u vic-backup.service --since '14 days ago' --no-pager -o short-iso 2>/dev/null \
+history=$(journalctl -u ${unit}.service --since '14 days ago' --no-pager -o short-iso 2>/dev/null \
   | rg 'Backup started:|snapshot [0-9a-f]+ saved|Backup completed:|Main process exited.*status=|Failed with result|Failed to start' \
   | tail -18 || true)
 
@@ -33,7 +37,7 @@ fi
 
 phase="Idle"
 if [[ "$service_active" == active || "$service_active" == activating ]]; then
-  control_group=$(systemctl show vic-backup.service -p ControlGroup --value 2>/dev/null || true)
+  control_group=$(systemctl show ${unit}.service -p ControlGroup --value 2>/dev/null || true)
   restic_command=""
   if [[ -n "$control_group" && -r "/sys/fs/cgroup${control_group}/cgroup.procs" ]]; then
     while read -r pid; do
@@ -47,7 +51,7 @@ if [[ "$service_active" == active || "$service_active" == activating ]]; then
     *" forget "*|"restic forget"*) phase="Applying retention and pruning" ;;
     *" prune "*|"restic prune"*) phase="Pruning repository" ;;
     *)
-      current_log=$(journalctl -u vic-backup.service --since "$started" --no-pager -o cat 2>/dev/null || true)
+      current_log=$(journalctl -u ${unit}.service --since "$started" --no-pager -o cat 2>/dev/null || true)
       if [[ "$current_log" == *"snapshot "*" saved"* ]]; then
         phase="Finalizing backup"
       else
@@ -83,6 +87,7 @@ fi
 
 jq -n \
   --arg state "$state" \
+  --arg unit "$unit" \
   --arg timerActive "$timer_active" \
   --arg timerEnabled "$timer_enabled" \
   --arg serviceActive "$service_active" \
@@ -98,4 +103,4 @@ jq -n \
   --arg snapshot "$snapshot" \
   --argjson failures "${failures:-0}" \
   --arg history "$history" \
-  '{state:$state,timerActive:$timerActive,timerEnabled:$timerEnabled,serviceActive:$serviceActive,result:$result,timerLoad:$timerLoad,serviceLoad:$serviceLoad,persistent:$persistent,lastTrigger:$lastTrigger,nextRun:$nextRun,started:$started,phase:$phase,completed:$completed,snapshot:$snapshot,failures7d:$failures,history:$history}'
+  '{state:$state,unit:$unit,timerActive:$timerActive,timerEnabled:$timerEnabled,serviceActive:$serviceActive,result:$result,timerLoad:$timerLoad,serviceLoad:$serviceLoad,persistent:$persistent,lastTrigger:$lastTrigger,nextRun:$nextRun,started:$started,phase:$phase,completed:$completed,snapshot:$snapshot,failures7d:$failures,history:$history}'
