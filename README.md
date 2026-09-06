@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="assets/banner.svg" width="880"
+       alt="Backup Sizzle — restic to Backblaze B2 monitoring for the Omarchy bar">
+</p>
+
 # Backup Sizzle
 
 An [Omarchy](https://omarchy.org) bar widget that monitors a **restic → Backblaze B2**
@@ -49,6 +54,7 @@ manual **Start** button rather than a hardcoded name.
 | `Sparkline.qml` | Small inline trend line |
 | `deploy.sh` | Sync this checkout to the live plugin dir and restart the shell |
 | `tests/` | Fixture-driven tests for `status` |
+| `assets/` | README banner and the script that generates it — not deployed |
 
 ### `metrics` modes
 
