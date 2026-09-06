@@ -119,7 +119,7 @@ installed plugin in place — check before you clobber.
 
 Tests stub `systemctl` and `journalctl` from `tests/bin` and feed the collector journal
 fixtures through `JOURNAL_CAT` / `JOURNAL_ISO`. The mocks match any `<host>-backup` unit,
-and `run.sh` pins `BACKUP_MONITOR_UNIT=vic-backup` so results do not depend on the
+and `run.sh` pins `BACKUP_MONITOR_UNIT=fixture-backup` so results do not depend on the
 hostname of the machine running the suite.
 
 ### Known gap

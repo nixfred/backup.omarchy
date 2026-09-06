@@ -4,16 +4,16 @@ cd "$(dirname "$0")/.."
 pass=0
 ok() { pass=$((pass+1)); printf '  ✓ %s\n' "$1"; }
 export PATH="$PWD/tests/bin:/usr/bin:/bin"
-# Pin the unit so fixtures do not depend on the hostname of the box running them;
-# the fixture journal text below is written for vic-backup.
-export BACKUP_MONITOR_UNIT=vic-backup
+# Pin a host-neutral fixture unit so results do not depend on the machine
+# running the suite. Production collectors resolve $(hostname)-backup.
+export BACKUP_MONITOR_UNIT=fixture-backup
 chmod +x tests/bin/systemctl tests/bin/journalctl
 completed="=== Backup completed: $(date) ==="
 snapshot='snapshot 17e1da2d saved'
 timeout_log=$(printf '%s\n' "$completed" "$snapshot" '=== Backup started: Fri Aug 28 05:13:41 PM EDT 2026 ===' \
-  'vic-backup.service: start operation timed out. Terminating.' \
-  'vic-backup.service: Main process exited, code=exited, status=130/n/a' \
-  "vic-backup.service: Failed with result 'timeout'.")
+  'fixture-backup.service: start operation timed out. Terminating.' \
+  'fixture-backup.service: Main process exited, code=exited, status=130/n/a' \
+  "fixture-backup.service: Failed with result 'timeout'.")
 export JOURNAL_CAT="$timeout_log" JOURNAL_ISO="$timeout_log"
 out=$(./status)
 jq -e '.state=="failed" and .result=="timeout (status 130)" and .failures7d==1' <<<"$out" >/dev/null \
