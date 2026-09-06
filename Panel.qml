@@ -13,7 +13,7 @@ Panel {
   manageIpc: false
 
   property string state: "unknown"
-  property string unit: "vic-backup"
+  property string unit: ""  // filled from status.unit (hostname-backup)
   property string timerActive: "unknown"
   property string serviceActive: "unknown"
   property string result: "unknown"
@@ -164,6 +164,7 @@ Panel {
   }
   function startBackup() {
     if (startProc.running || serviceActive === "active" || serviceActive === "activating") return
+    if (!unit) { actionNote = "Backup unit unknown — wait for status"; return }
     state = "running"
     serviceActive = "activating"
     phase = "Requesting systemd start"
