@@ -132,7 +132,19 @@ Panel {
 
   property string actionNote: ""
   property string statusError: ""
-  readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
+  // Resolve helper *files*, not the QML directory. Qt.resolvedUrl(".") can
+  // come back as the Panel.qml path, which made command ".../Panel.qml/status"
+  // and painted the icon red even when dex-backup was healthy.
+  function fsPath(url) {
+    return decodeURIComponent(String(url).replace(/^file:\/\//, ""))
+  }
+  readonly property string statusScript: root.fsPath(Qt.resolvedUrl("status"))
+  readonly property string metricsScript: root.fsPath(Qt.resolvedUrl("metrics"))
+  readonly property string pluginDir: {
+    var p = root.statusScript
+    var i = p.lastIndexOf("/")
+    return i >= 0 ? p.slice(0, i) : p
+  }
   readonly property int refreshMs: Math.max(15, Number(root.setting("refreshIntervalSec", 60))) * 1000
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.45)
@@ -186,22 +198,31 @@ Panel {
 
   Process {
     id: statusProc
-    command: [root.pluginDir + "/status"]
+    command: [root.statusScript]
     property bool parsed: false
     property string errorText: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try { root.applyStatus(JSON.parse(text)); statusProc.parsed = true }
-        catch (e) { statusProc.parsed = false }
+        try {
+          root.applyStatus(JSON.parse(text))
+          statusProc.parsed = true
+        } catch (e) {
+          statusProc.parsed = false
+          root.state = "failed"
+          root.statusError = "Could not parse backup status"
+        }
       }
     }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: statusProc.errorText = text.trim() }
     onRunningChanged: if (running) { parsed = false; errorText = "" }
     onExited: function(exitCode) {
-      if (exitCode !== 0 || !parsed) {
+      // Do not treat "stdout not yet parsed" as failure: onExited can fire
+      // before waitForEnd delivers the JSON. A real nonzero exit is a failure;
+      // empty/broken stdout is handled in onStreamFinished.
+      if (exitCode !== 0) {
         root.state = "failed"
-        root.statusError = errorText !== "" ? errorText : "Could not read backup status"
+        root.statusError = errorText !== "" ? errorText : "Could not read backup status (exit " + exitCode + ")"
       }
     }
   }
@@ -217,7 +238,7 @@ Panel {
   // log. Cheap enough to re-run on every refresh.
   Process {
     id: metricsProc
-    command: [root.pluginDir + "/metrics"]
+    command: [root.metricsScript]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -231,7 +252,7 @@ Panel {
   // actually on screen — there is nothing to draw otherwise.
   Process {
     id: netStream
-    command: [root.pluginDir + "/metrics", "--stream"]
+    command: [root.metricsScript, "--stream"]
     running: root.opened
     stdout: SplitParser {
       onRead: function(line) {
@@ -249,7 +270,10 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refresh(); return "ok" }
-    function status(): string { return root.state + " snapshot=" + root.snapshot + " opened=" + root.opened }
+    function status(): string {
+      return root.state + " snapshot=" + root.snapshot + " opened=" + root.opened
+        + " unit=" + root.unit + (root.statusError !== "" ? " err=" + root.statusError : "")
+    }
   }
 
   Process {
@@ -278,7 +302,7 @@ Panel {
   // Repository queries. Both hit B2 through pkexec and are user-initiated only.
   Process {
     id: snapshotsProc
-    command: [root.pluginDir + "/metrics", "--snapshots"]
+    command: [root.metricsScript, "--snapshots"]
     onRunningChanged: if (running) { root.repoLoading = true; root.repoError = "" }
     stdout: StdioCollector {
       waitForEnd: true
@@ -300,7 +324,7 @@ Panel {
   Process {
     id: lsProc
     property string forId: ""
-    command: [root.pluginDir + "/metrics", "--ls", lsProc.forId]
+    command: [root.metricsScript, "--ls", lsProc.forId]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -338,7 +362,8 @@ Panel {
       ? "Restic backup is running — click for details"
       : root.state === "attention"
         ? "Restic backup needs attention — click for details"
-        : "Restic: " + root.state + (root.snapshot !== "" ? " · " + root.snapshot : "") + " — click for details"
+        : "Restic: " + root.state + (root.snapshot !== "" ? " · " + root.snapshot : "")
+          + (root.statusError !== "" ? " — " + root.statusError : " — click for details")
     iconComponent: Component {
       Item {
         Text {
