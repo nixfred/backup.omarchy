@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Host-agnostic: status/metrics resolve the unit from $(hostname), so match any
+# "<host>-backup" unit rather than a literal name. Pinning the mock to one host
+# silently turned every LoadState lookup into "" and read as a failed backup.
+case "$1" in
+  is-active)
+    [[ "$2" == *-backup.timer ]] && echo active || echo inactive ;;
+  is-enabled) echo enabled ;;
+  show)
+    args="$*"
+    case "$args" in
+      *-backup.timer*LoadState*) echo loaded ;;
+      *-backup.service*LoadState*) echo loaded ;;
+      *Persistent*) echo yes ;;
+      *LastTriggerUSec*) echo 'Fri 2026-08-28 01:00:00 EDT' ;;
+      *NextElapseUSecRealtime*) echo 'Sat 2026-08-29 01:00:00 EDT' ;;
+      *ExecMainStartTimestamp*) echo 'Fri 2026-08-28 17:13:41 EDT' ;;
+      *Result*) echo success ;;
+      *ControlGroup*) echo '' ;;
+      *) echo '' ;;
+    esac ;;
+esac

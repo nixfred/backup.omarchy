@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *'-o short-iso'* ]]; then
+  printf '%s\n' "$JOURNAL_ISO"
+else
+  printf '%s\n' "$JOURNAL_CAT"
+fi
