@@ -4,6 +4,9 @@ cd "$(dirname "$0")/.."
 pass=0
 ok() { pass=$((pass+1)); printf '  ✓ %s\n' "$1"; }
 export PATH="$PWD/tests/bin:/usr/bin:/bin"
+# Pin the unit so fixtures do not depend on the hostname of the box running them;
+# the fixture journal text below is written for vic-backup.
+export BACKUP_MONITOR_UNIT=vic-backup
 chmod +x tests/bin/systemctl tests/bin/journalctl
 completed="=== Backup completed: $(date) ==="
 snapshot='snapshot 17e1da2d saved'
