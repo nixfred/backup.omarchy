@@ -61,6 +61,19 @@ if [[ "$service_active" == active || "$service_active" == activating ]]; then
   esac
 fi
 
+# A run skipped by an ExecCondition gate is a deliberate no-op, not a failure:
+# systemd reports Result=exec-condition and leaves the unit un-failed. gus gates
+# on being at home and on 6h having passed since the last success, so most hourly
+# firings skip by design. Treat it as success for state, but keep the gate's own
+# explanation so the panel can say why nothing ran.
+skipped=no
+skip_reason=""
+if [[ "$result" == exec-condition ]]; then
+  skipped=yes
+  skip_reason=$(printf '%s\n' "$recent_log" | sed -n 's/^gate: SKIP - //p' | tail -1)
+  result=success
+fi
+
 state=healthy
 if [[ "$service_active" == active || "$service_active" == activating ]]; then
   state=running
@@ -103,4 +116,6 @@ jq -n \
   --arg snapshot "$snapshot" \
   --argjson failures "${failures:-0}" \
   --arg history "$history" \
-  '{state:$state,unit:$unit,timerActive:$timerActive,timerEnabled:$timerEnabled,serviceActive:$serviceActive,result:$result,timerLoad:$timerLoad,serviceLoad:$serviceLoad,persistent:$persistent,lastTrigger:$lastTrigger,nextRun:$nextRun,started:$started,phase:$phase,completed:$completed,snapshot:$snapshot,failures7d:$failures,history:$history}'
+  --arg skipped "$skipped" \
+  --arg skipReason "$skip_reason" \
+  '{state:$state,unit:$unit,timerActive:$timerActive,timerEnabled:$timerEnabled,serviceActive:$serviceActive,result:$result,timerLoad:$timerLoad,serviceLoad:$serviceLoad,persistent:$persistent,lastTrigger:$lastTrigger,nextRun:$nextRun,started:$started,phase:$phase,completed:$completed,snapshot:$snapshot,failures7d:$failures,history:$history,skipped:$skipped,skipReason:$skipReason}'
